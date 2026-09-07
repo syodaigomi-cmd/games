@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>顔で飛ぶ！3Dフライトゲーム</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#06152e;font-family:system-ui,sans-serif;color:white}
+#game{display:block;width:100vw;height:100vh;background:#0b4b83}
+#ui{position:fixed;inset:0;pointer-events:none}
+.panel{position:absolute;top:10px;left:10px;background:#0008;border-radius:14px;padding:10px 13px;backdrop-filter:blur(5px)}
+button{pointer-events:auto;border:0;border-radius:14px;padding:12px 16px;font-size:16px;font-weight:bold;background:#fff;color:#123}
+#start{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);text-align:center;background:#0009;padding:24px;border-radius:20px;pointer-events:auto}
+#camera{position:absolute;right:10px;bottom:10px;width:120px;height:90px;object-fit:cover;border-radius:12px;transform:scaleX(-1);display:none;opacity:.75}
+#msg{font-size:14px;line-height:1.5;margin:8px 0 14px}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="ui">
+  <div class="panel">SCORE <b id="score">0</b><br>DIST <b id="dist">0</b> m</div>
+  <video id="camera" autoplay playsinline muted></video>
+  <div id="start">
+    <h2>✈️ 顔で飛ぶ！3Dフライト</h2>
+    <div id="msg">顔を左・右・上・下に動かして飛行機を操作します。<br>まずカメラを許可してください。</div>
+    <button id="startBtn">📷 カメラ開始</button>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script>
+const canvas=document.getElementById('game'),ctx=canvas.getContext('2d');
+const video=document.getElementById('camera');
+const start=document.getElementById('start'),btn=document.getElementById('startBtn');
+const scoreEl=document.getElementById('score'),distEl=document.getElementById('dist');
+let W,H,dpr,playing=false,score=0,dist=0;
+let faceX=.5,faceY=.5,targetX=.5,targetY=.5;
+let plane={x:0,y:0,z:0};
+let obstacles=[], rings=[], clouds=[];
+let last=0;
+
+function resize(){
+ dpr=Math.min(devicePixelRatio||1,2); W=innerWidth;H=innerHeight;
+ canvas.width=W*dpr;canvas.height=H*dpr;canvas.style.width=W+'px';canvas.style.height=H+'px';
+ ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+addEventListener('resize',resize);resize();
+
+function reset(){
+ score=0;dist=0;plane={x:0,y:0,z:0};obstacles=[];rings=[];clouds=[];
+ for(let i=0;i<12;i++) spawn(i*45+80);
+}
+function spawn(z){
+ obstacles.push({x:(Math.random()-.5)*12,y:(Math.random()-.5)*7,z,r:1.0+Math.random()*.8});
+ if(Math.random()<.55) rings.push({x:(Math.random()-.5)*10,y:(Math.random()-.5)*6,z:z+18,r:2.2});
+}
+function project(x,y,z){
+ const f=520/(z+1);
+ return {x:W/2+x*f,y:H*.53-y*f,s:f};
+}
+function drawBackground(){
+ let g=ctx.createLinearGradient(0,0,0,H);g.addColorStop(0,'#071a46');g.addColorStop(.5,'#35a9df');g.addColorStop(1,'#d9f4ff');
+ ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+ // distant mountains
+ ctx.fillStyle='#527d9b';ctx.beginPath();ctx.moveTo(0,H*.62);
+ for(let x=0;x<=W;x+=70)ctx.lineTo(x,H*.55-Math.sin(x*.02)*35);
+ ctx.lineTo(W,H);ctx.lineTo(0,H);ctx.fill();
+}
+function draw(){
+ drawBackground();
+ // speed lines
+ ctx.strokeStyle='#ffffff55';ctx.lineWidth=2;
+ for(let i=0;i<28;i++){let x=(i*83+dist*3)%W;ctx.beginPath();ctx.moveTo(x,H*.5);ctx.lineTo(x+(x-W/2)*.08,H);ctx.stroke();}
+ [...obstacles].sort((a,b)=>b.z-a.z).forEach(o=>{
+   if(o.z<=1)return;
+   let p=project(o.x-plane.x,o.y-plane.y,o.z);
+   let rr=o.r*p.s;
+   ctx.fillStyle='#e84b4b';ctx.beginPath();ctx.arc(p.x,p.y,rr,0,Math.PI*2);ctx.fill();
+   ctx.strokeStyle='#ffdfdf';ctx.lineWidth=Math.max(2,p.s*.08);ctx.stroke();
+ });
+ rings.forEach(r=>{
+   if(r.z<=1)return;
+   let p=project(r.x-plane.x,r.y-plane.y,r.z),rr=r.r*p.s;
+   ctx.strokeStyle='#ffd43b';ctx.lineWidth=Math.max(3,p.s*.16);ctx.beginPath();ctx.arc(p.x,p.y,rr,0,Math.PI*2);ctx.stroke();
+ });
+ // plane
+ ctx.save();ctx.translate(W/2,H*.76);
+ ctx.rotate((faceX-.5)*-.25);
+ ctx.fillStyle='#f5f7fa';ctx.beginPath();ctx.moveTo(0,-48);ctx.lineTo(13,20);ctx.lineTo(4,18);ctx.lineTo(0,38);ctx.lineTo(-4,18);ctx.lineTo(-13,20);ctx.closePath();ctx.fill();
+ ctx.fillStyle='#48a9ff';ctx.beginPath();ctx.moveTo(-7,8);ctx.lineTo(-43,27);ctx.lineTo(-8,23);ctx.lineTo(0,12);ctx.closePath();ctx.fill();
+ ctx.beginPath();ctx.moveTo(7,8);ctx.lineTo(43,27);ctx.lineTo(8,23);ctx.lineTo(0,12);ctx.closePath();ctx.fill();
+ ctx.restore();
+}
+function update(dt){
+ // 顔位置をなめらかに追従
+ faceX += (targetX-faceX)*Math.min(1,dt*7);
+ faceY += (targetY-faceY)*Math.min(1,dt*7);
+ plane.x=(faceX-.5)*11; plane.y=(.5-faceY)*7;
+ let speed=34;
+ dist+=speed*dt/10;
+ obstacles.forEach(o=>o.z-=speed*dt); rings.forEach(r=>r.z-=speed*dt);
+ // 判定
+ obstacles=obstacles.filter(o=>{
+   if(o.z<2.2){
+     let hit=Math.hypot(o.x-plane.x,o.y-plane.y)<o.r+1.0;
+     if(hit){gameOver();return false}
+   }
+   return o.z>-10;
+ });
+ rings=rings.filter(r=>{
+   if(r.z<2.5 && !r.hit){
+     if(Math.hypot(r.x-plane.x,r.y-plane.y)<r.r){score+=10;r.hit=true}
+   }
+   return r.z>-8;
+ });
+ while(obstacles.length<12)spawn(500+Math.random()*500);
+ scoreEl.textContent=score;distEl.textContent=Math.floor(dist);
+}
+function loop(t){
+ if(!playing)return;
+ let dt=Math.min(.05,(t-last)/1000||.016);last=t;
+ update(dt);draw();requestAnimationFrame(loop);
+}
+function gameOver(){
+ playing=false;
+ setTimeout(()=>{alert('💥 墜落！ スコア '+score+'　距離 '+Math.floor(dist)+'m');start.style.display='block';btn.textContent='もう一度飛ぶ';},20);
+}
+async function begin(){
+ try{
+   const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:false});
+   video.srcObject=stream;video.style.display='block';
+   const mesh=new FaceMesh({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}`});
+   mesh.setOptions({maxNumFaces:1,refineLandmarks:false,minDetectionConfidence:.5,minTrackingConfidence:.5});
+   mesh.onResults(res=>{
+     if(!res.multiFaceLandmarks?.length)return;
+     const p=res.multiFaceLandmarks[0];
+     // 鼻先。画面を鏡として左右を自然に操作
+     const nose=p[1]; targetX=1-nose.x; targetY=nose.y;
+   });
+   const cam=new Camera(video,{onFrame:async()=>{await mesh.send({image:video})},width:640,height:480});
+   cam.start();
+   start.style.display='none';reset();playing=true;last=performance.now();requestAnimationFrame(loop);
+ }catch(e){
+   document.getElementById('msg').textContent='カメラを使うには許可が必要です。HTTPSまたはlocalhostで開いてください。';
+ }
+}
+btn.onclick=begin;
+</script>
+</body>
+</html>
