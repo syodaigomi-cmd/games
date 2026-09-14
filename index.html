@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>3D飛行船リングアドベンチャー</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#8ed8ff;font-family:system-ui,sans-serif}
+#game{position:fixed;inset:0}
+#ui{position:fixed;left:12px;right:12px;top:10px;z-index:5;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.panel{background:rgba(255,255,255,.86);border-radius:14px;padding:8px 11px;box-shadow:0 3px 12px #0002;font-weight:700}
+button{border:0;border-radius:12px;padding:9px 13px;font-weight:800;background:#fff;box-shadow:0 2px 8px #0002}
+#speed{width:110px;vertical-align:middle}
+#status{font-size:13px}
+#camera{position:fixed;right:12px;bottom:58px;width:150px;height:112px;object-fit:cover;border-radius:14px;transform:scaleX(-1);z-index:4;display:none;border:3px solid #fff;box-shadow:0 3px 12px #0003}
+
+#gestureGuide{position:fixed;left:50%;transform:translateX(-50%);bottom:12px;z-index:5;background:#ffffffd9;border-radius:15px;padding:9px 13px;text-align:center;font-size:13px}
+#start{position:fixed;inset:0;z-index:10;display:grid;place-items:center;background:linear-gradient(#73cfff,#dff7ff)}
+.card{width:min(90vw,430px);background:#fff;border-radius:24px;padding:24px;box-sizing:border-box;text-align:center;box-shadow:0 12px 40px #0003}
+.card h1{margin:0 0 10px;font-size:28px}.card p{line-height:1.7}
+.big{font-size:18px;background:#55b8ff;color:#fff;padding:14px 28px;border-radius:16px}
+</style>
+</head>
+<body>
+<div id="game"></div>
+<div id="start"><div class="card">
+<h1>🎈 3D 飛行船</h1>
+<p>飛行船を操縦して、<b>リングをくぐろう！</b><br>
+障害物なし。飛行船は画面中央より少し上がホームポジションです。</p>
+<button class="big" id="startBtn">スタート</button>
+<p style="font-size:12px">スタート後、視線操作をONにできます。視線操作で飛行船を操縦します。</p>
+</div></div>
+
+<div id="ui">
+<div class="panel">⭕ リング <span id="score">0</span></div><div class="panel">⏱️ <span id="time">2:00</span></div>
+<div class="panel">⏱️ 時間 <select id="duration"><option value="60">1分</option><option value="120" selected>2分</option><option value="180">3分</option></select></div><div class="panel">⚡ 速度 <input id="speed" type="range" min="1" max="10" value="5"> <span id="speedVal">5</span></div>
+<div class="panel" id="status">視線操作：準備中</div>
+<button id="resetBtn">↻ リセット</button>
+</div>
+
+<video id="camera" autoplay playsinline muted></video>
+<div id="gestureGuide">👀 視線：左＝左　右＝右　上＝上昇　下＝下降</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/vision_bundle.js"></script>
+
+<script>
+let scene,camera,renderer,ship,ringGroup=[],clouds=[],propellers=[];
+let score=0, speed=5, durationSeconds=120, stream=null, gameSeconds=120, gameStart=0, gameEnded=false;
+let faceLandmarker=null, gazeActive=false, gazeBusy=false, gazeBaseX=null, gazeBaseY=null, gazeSmoothX=.5, gazeSmoothY=.5, lastGazeTime=0;
+let targetX=0,targetY=2.8, shipX=0,shipY=2.8, shipZ=0, velX=0,velY=0;
+let lastTime=performance.now();
+
+
+const $=id=>document.getElementById(id);
+$('speed').oninput=e=>{speed=+e.target.value;$('speedVal').textContent=speed};$('duration').onchange=e=>{durationSeconds=+e.target.value;resetGame()};
+$('resetBtn').onclick=()=>resetGame();
+
+$('startBtn').onclick=async()=>{ if(!renderer) init(); $('start').style.display='none'; $('status').textContent='視線操作：カメラを起動中…'; await startGaze(); };
+
+function init(){
+ scene=new THREE.Scene();
+ scene.background=new THREE.Color(0x83d5ff);
+ scene.fog=new THREE.Fog(0x83d5ff,35,180);
+ camera=new THREE.PerspectiveCamera(62,innerWidth/innerHeight,.1,300);
+ camera.position.set(0,4.5,13);
+ camera.lookAt(0,3,-20);
+ renderer=new THREE.WebGLRenderer({antialias:true});
+ renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+ renderer.setSize(innerWidth,innerHeight);
+ $('game').appendChild(renderer.domElement);
+
+ scene.add(new THREE.HemisphereLight(0xffffff,0x72a7cc,2.1));
+ const sun=new THREE.DirectionalLight(0xffffff,2);sun.position.set(10,20,10);scene.add(sun);
+
+ const sea=new THREE.Mesh(new THREE.PlaneGeometry(400,400),new THREE.MeshPhongMaterial({color:0x36a9d6}));
+ sea.rotation.x=-Math.PI/2;sea.position.y=-2;scene.add(sea);
+
+ for(let i=0;i<15;i++) makeIsland(i);
+ for(let i=0;i<30;i++) makeCloud(i);
+ makeShip(); resetGame();
+ addEventListener('resize',resize);
+
+ animate();
+}
+function makeIsland(i){
+ const g=new THREE.Group();
+ const rock=new THREE.Mesh(new THREE.ConeGeometry(3+Math.random()*3,2+Math.random()*2,7),new THREE.MeshPhongMaterial({color:0x8bcf77}));
+ rock.position.y=-.5;g.add(rock);
+ const top=new THREE.Mesh(new THREE.CylinderGeometry(2+Math.random()*2,2.8+Math.random()*2,0.7,7),new THREE.MeshPhongMaterial({color:0x55b96a}));
+ top.position.y=.8;g.add(top);
+ g.position.set((Math.random()-.5)*100,-.5,-20-i*12);scene.add(g);
+}
+function makeCloud(i){
+ const g=new THREE.Group();
+ for(let j=0;j<5;j++){let m=new THREE.Mesh(new THREE.SphereGeometry(1.2+Math.random()*1.5,12,10),new THREE.MeshPhongMaterial({color:0xffffff,transparent:true,opacity:.9}));m.position.set(j*1.5,Math.random()*1.3,Math.random());g.add(m)}
+ g.position.set((Math.random()-.5)*80,8+Math.random()*20,-10-Math.random()*170);g.scale.setScalar(.7+Math.random()*1.5);scene.add(g);clouds.push(g);
+}
+function makeShip(){
+ ship=new THREE.Group();
+ propellers=[];
+
+ // ① まるくてかわいいパステルピンクの気球
+ const balloon=new THREE.Mesh(
+   new THREE.SphereGeometry(1.55,36,24),
+   new THREE.MeshPhongMaterial({color:0xf7b6d2,shininess:90})
+ );
+ balloon.scale.set(1.08,1.0,1.05);
+ balloon.position.y=.35;
+ ship.add(balloon);
+
+ // やさしい色の縦帯
+ for(const x of [-1.05,-.35,.35,1.05]){
+   const band=new THREE.Mesh(
+     new THREE.TorusGeometry(.99,.055,10,36),
+     new THREE.MeshPhongMaterial({color:0xffe6f1,shininess:60})
+   );
+   band.rotation.y=Math.PI/2;
+   band.position.set(x*.72,.35,0);
+   band.scale.set(.98,1,1);
+   ship.add(band);
+ }
+
+ // 小さくてかわいいゴンドラ
+ const cabin=new THREE.Mesh(
+   new THREE.BoxGeometry(1.45,.62,1.0),
+   new THREE.MeshPhongMaterial({color:0xe8a6bd,shininess:65})
+ );
+ cabin.position.set(0,-.75,.05);
+ ship.add(cabin);
+
+ // ゴンドラの白い縁
+ const rim=new THREE.Mesh(
+   new THREE.BoxGeometry(1.58,.10,1.08),
+   new THREE.MeshPhongMaterial({color:0xfff1f7,shininess:70})
+ );
+ rim.position.set(0,-.43,.05);
+ ship.add(rim);
+
+ // 後ろから見える丸い窓
+ for(const x of [-.48,0,.48]){
+   const w=new THREE.Mesh(
+     new THREE.CylinderGeometry(.14,.14,.055,20),
+     new THREE.MeshPhongMaterial({color:0xbfefff,shininess:90})
+   );
+   w.rotation.x=Math.PI/2;
+   w.position.set(x,-.68,.54);
+   ship.add(w);
+ }
+
+ // 尾翼
+ const tailFin=new THREE.Mesh(
+   new THREE.ConeGeometry(.48,1.25,4),
+   new THREE.MeshPhongMaterial({color:0xd8b4ef,shininess:60})
+ );
+ tailFin.rotation.x=Math.PI/2;
+ tailFin.position.set(0,.35,1.55);
+ ship.add(tailFin);
+
+ const leftFin=new THREE.Mesh(
+   new THREE.BoxGeometry(.12,.85,.58),
+   new THREE.MeshPhongMaterial({color:0xe5b8d0,shininess:55})
+ );
+ leftFin.position.set(-.92,.35,1.18);
+ leftFin.rotation.z=-.35;
+ ship.add(leftFin);
+
+ const rightFin=leftFin.clone();
+ rightFin.position.x=.92;
+ rightFin.rotation.z=.35;
+ ship.add(rightFin);
+
+ // 後方の左右プロペラ
+ for(const x of [-.72,.72]){
+   const motor=new THREE.Mesh(
+     new THREE.CylinderGeometry(.18,.18,.38,16),
+     new THREE.MeshPhongMaterial({color:0xd7a9bc,shininess:80})
+   );
+   motor.rotation.x=Math.PI/2;
+   motor.position.set(x,-.45,1.12);
+   ship.add(motor);
+
+   const hub=new THREE.Mesh(
+     new THREE.SphereGeometry(.12,16,12),
+     new THREE.MeshPhongMaterial({color:0xfff0a8,shininess:90})
+   );
+   hub.position.set(x,-.45,1.38);
+   ship.add(hub);
+
+   const prop=new THREE.Group();
+   for(let a=0;a<3;a++){
+     const blade=new THREE.Mesh(
+       new THREE.BoxGeometry(.10,.78,.07),
+       new THREE.MeshPhongMaterial({color:0xf7b6d2,shininess:70})
+     );
+     blade.position.y=.34;
+     blade.rotation.z=a*Math.PI*2/3;
+     prop.add(blade);
+   }
+   prop.position.set(x,-.45,1.40);
+   prop.rotation.z=.2;
+   ship.add(prop);
+ }
+
+ // 以前と同じ30%小さめ。画面上では扱いやすく、後ろ姿を見やすくする。
+ ship.scale.setScalar(.7);
+ ship.position.set(0,2.8,2);
+ scene.add(ship);
+}
+function makeRing(z){
+ const colors=[0xff4d6d,0xffd43b,0x4dd9ff,0x7ee081,0xb88cff,0xff8c42];
+ const shapes=[0,1,2]; const shape=shapes[Math.floor(Math.random()*shapes.length)];
+ let geo; if(shape===0) geo=new THREE.TorusGeometry(3.0,.18,14,64); else if(shape===1) geo=new THREE.RingGeometry(2.7,3.0,6); else geo=new THREE.RingGeometry(2.7,3.0,8);
+ const ring=new THREE.Mesh(geo,new THREE.MeshPhongMaterial({color:colors[Math.floor(Math.random()*colors.length)],emissive:0x222222,emissiveIntensity:.25,side:THREE.DoubleSide}));
+ ring.position.set((Math.random()-.5)*8,2.5+(Math.random()-.5)*3,z);
+ ring.rotation.set(0,0,0); scene.add(ring);ringGroup.push(ring);
+}
+function resetGame(){
+ gameEnded=false; gameSeconds=durationSeconds; gameStart=performance.now(); $('time').textContent=Math.floor(durationSeconds/60)+':00'; score=0;$('score').textContent=score;ringGroup.forEach(r=>scene.remove(r));ringGroup=[];
+ for(let i=0;i<10;i++)makeRing(-20-i*22);
+ shipX=0;shipY=2.8;targetX=0;targetY=2.8;velX=0;velY=0;gazeBaseX=null;gazeBaseY=null;resetOperationState();
+}
+function resetOperationState(){
+  targetX=0; targetY=2.8; velX=0; velY=0;
+}
+
+async function startGaze(){
+  if(gazeActive || gazeBusy)return;
+  gazeBusy=true;
+  $('gazeBtn').disabled=true;
+  $('status').textContent='視線操作：カメラを起動中…';
+  try{
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('getUserMedia unavailable');
+    if(stream)stream.getTracks().forEach(t=>t.stop());
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:false});
+    const video=$('camera');
+    video.srcObject=stream;
+    video.style.display='block';
+    await video.play();
+    const vision=await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm');
+    try{
+      faceLandmarker=await FaceLandmarker.createFromOptions(vision,{baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',delegate:'GPU'},runningMode:'VIDEO',numFaces:1});
+    }catch(e){
+      faceLandmarker=await FaceLandmarker.createFromOptions(vision,{baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',delegate:'CPU'},runningMode:'VIDEO',numFaces:1});
+    }
+    gazeActive=true; gazeBaseX=null; gazeBaseY=null; gazeSmoothX=.5; gazeSmoothY=.5;
+    $('status').textContent='👀 視線操作：ON';
+    detectGaze();
+  }catch(e){
+    console.log(e);
+    $('status').textContent='視線操作：カメラを使えません';
+    $('gazeBtn').disabled=false;
+  }finally{ gazeBusy=false; }
+}
+
+function eyeRatio(lm, irisIds, leftCorner, rightCorner, topIds, bottomIds){
+  const iris=irisIds.reduce((a,i)=>({x:a.x+lm[i].x/irisIds.length,y:a.y+lm[i].y/irisIds.length}),{x:0,y:0});
+  const x0=lm[leftCorner].x, x1=lm[rightCorner].x;
+  const yTop=topIds.reduce((a,i)=>a+lm[i].y/topIds.length,0);
+  const yBot=bottomIds.reduce((a,i)=>a+lm[i].y/bottomIds.length,0);
+  return {x:(iris.x-Math.min(x0,x1))/(Math.abs(x1-x0)||.001), y:(iris.y-yTop)/(Math.abs(yBot-yTop)||.001)};
+}
+
+function detectGaze(){
+  if(!gazeActive||!faceLandmarker){requestAnimationFrame(detectGaze);return;}
+  const video=$('camera');
+  if(video.readyState<2){requestAnimationFrame(detectGaze);return;}
+  const now=performance.now();
+  if(now-lastGazeTime<45){requestAnimationFrame(detectGaze);return;}
+  lastGazeTime=now;
+  try{
+    const r=faceLandmarker.detectForVideo(video,now);
+    if(r.faceLandmarks&&r.faceLandmarks[0]){
+      const lm=r.faceLandmarks[0];
+      const L=eyeRatio(lm,[468,469,470,471,472],33,133,[159,160],[145,144]);
+      const R=eyeRatio(lm,[473,474,475,476,477],362,263,[386,387],[374,373]);
+      let gx=(L.x+R.x)/2, gy=(L.y+R.y)/2;
+      gazeSmoothX += (gx-gazeSmoothX)*.35;
+      gazeSmoothY += (gy-gazeSmoothY)*.35;
+      if(gazeBaseX===null){gazeBaseX=gazeSmoothX;gazeBaseY=gazeSmoothY;}
+      // 視線の中心を基準に、少しの揺れは無視。感度は高め。
+      const dx=gazeSmoothX-gazeBaseX, dy=gazeSmoothY-gazeBaseY;
+      const dead=.035;
+      const sx=Math.abs(dx)<dead?0:THREE.MathUtils.clamp(dx/.13,-1,1);
+      const sy=Math.abs(dy)<dead?0:THREE.MathUtils.clamp(dy/.11,-1,1);
+      // カメラ映像に合わせて左右を直感的な向きに反転。
+      targetX=THREE.MathUtils.clamp(-sx*11,-10,10);
+      targetY=THREE.MathUtils.clamp(2.8-sy*8,-1,10);
+      $('status').textContent='👀 視線操作：ON';
+    }
+  }catch(e){console.log(e);}
+  requestAnimationFrame(detectGaze);
+}
+
+function animate(){
+ requestAnimationFrame(animate);
+ const now=performance.now();
+ if(!gameEnded){ gameSeconds=Math.max(0,durationSeconds-(now-gameStart)/1000); const mm=Math.floor(gameSeconds/60), ss=Math.floor(gameSeconds%60); $('time').textContent=mm+':'+String(ss).padStart(2,'0'); if(gameSeconds<=0){gameEnded=true;$('status').textContent='⏱️ ゴール！ リング '+score+' 個';}}
+ const dt=Math.min((now-lastTime)/1000,.04);lastTime=now;
+ // 加速度的な移動：顔を大きく動かすほど加速し、慣性をつけて移動します。
+ const accel=8.0;
+ const damping=Math.pow(0.08,dt);
+ velX+=(targetX-shipX)*accel*dt;
+ velY+=(targetY-shipY)*accel*dt;
+ velX*=damping; velY*=damping;
+ const maxVel=11;
+ velX=THREE.MathUtils.clamp(velX,-maxVel,maxVel);
+ velY=THREE.MathUtils.clamp(velY,-maxVel,maxVel);
+ shipX+=velX*dt; shipY+=velY*dt;
+ if(shipX<-10){shipX=-10;velX=0}
+ if(shipX>10){shipX=10;velX=0}
+ if(shipY<-1){shipY=-1;velY=0}
+ if(shipY>10){shipY=10;velY=0}
+ ship.position.x=shipX;ship.position.y=shipY;
+ const dx=targetX-shipX,dy=targetY-shipY;
+ ship.rotation.z=THREE.MathUtils.clamp(-dx*.34,-1.25,1.25);
+ ship.rotation.x=THREE.MathUtils.clamp(dy*.28,-1.05,1.05);
+ ship.rotation.y=THREE.MathUtils.clamp(dx*.14,-.65,.65);
+
+ const dz=(gameEnded?0:(2+speed*.85)*1)*dt;
+ ringGroup.forEach(r=>{r.position.z+=dz;r.rotation.z+=dt*.8});
+ for(const r of ringGroup){
+  const d=Math.hypot(r.position.x-ship.position.x,r.position.y-ship.position.y);
+  if(r.position.z>ship.position.z-1 && r.position.z<ship.position.z+1 && d<2.7){score++;$('score').textContent=score;r.position.z-=150;r.position.x=(Math.random()-.5)*8;r.position.y=2.5+(Math.random()-.5)*3}
+  if(r.position.z>12){r.position.z-=160;r.position.x=(Math.random()-.5)*8;r.position.y=2.5+(Math.random()-.5)*3}
+ }
+ clouds.forEach(c=>{c.position.z+=speed*.15*dt;if(c.position.z>25)c.position.z=-180});
+ camera.position.x+=(ship.position.x*.18-camera.position.x)*.03;
+ camera.position.y+=(ship.position.y*.12+4.3-camera.position.y)*.03;
+ camera.lookAt(ship.position.x*.2,ship.position.y*.35,-25);
+ renderer.render(scene,camera);
+}
+function resize(){camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)}
+</script>
+</body>
+</html>
